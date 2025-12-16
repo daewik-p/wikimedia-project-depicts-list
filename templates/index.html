@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Commons Depicts Explorer</title>
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+
+    <!-- Navbar -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary fixed-top">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="#">Commons Depicts Explorer</a>
+            <div class="d-flex w-50">
+                <input class="form-control me-2" type="search" id="searchInput"
+                    placeholder="Search for what an image depicts (e.g., Cat)" aria-label="Search">
+                <button class="btn btn-light" type="submit" id="searchBtn">Search</button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="container-fluid main-container">
+
+        <div id="searchInfo" class="text-center my-4" style="display:none;">
+            <h2 id="resolvedEntityName"></h2>
+            <p id="resolvedEntityDesc" class="text-muted"></p>
+        </div>
+
+        <div id="loader" class="text-center my-5" style="display:none;">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+        </div>
+
+        <div id="resultsGrid" class="row g-3 masonry-grid">
+            <!-- Images will be injected here -->
+        </div>
+
+        <div id="loadMoreContainer" class="text-center my-4" style="display:none;">
+            <button id="loadMoreBtn" class="btn btn-outline-primary px-4">Load More</button>
+        </div>
+    </div>
+
+    <!-- Hidden Split View Overlay -->
+    <div id="splitView" class="split-view-overlay" style="display:none;">
+        <button id="closeSplitView" class="btn-close btn-close-white position-absolute top-0 end-0 m-3 z-3"></button>
+
+        <div class="split-container">
+            <!-- Left Panel: Image -->
+            <div class="left-panel d-flex align-items-center justify-content-center bg-dark">
+                <img id="detailImage" src="" alt="Detail View" class="img-fluid" style="max-height: 90vh;">
+            </div>
+
+            <!-- Right Panel: Metadata & Depicts -->
+            <div class="right-panel bg-light p-4 overflow-auto">
+                <h4 id="detailTitle">File Name</h4>
+                <p id="detailDesc" class="text-muted small">Description</p>
+                <div class="mb-3">
+                    <a id="detailLink" href="#" target="_blank" class="btn btn-sm btn-outline-secondary">View on
+                        Commons</a>
+                </div>
+
+                <hr>
+
+                <h5>Depicted Entities (P180)</h5>
+                <div id="depictsList" class="d-flex flex-wrap gap-2 mb-3">
+                    <!-- Badges injected here -->
+                </div>
+
+                <hr>
+
+                <h6>Add Depicts Statement</h6>
+                <div class="input-group mb-2">
+                    <input type="text" class="form-control" id="addDepictInput" placeholder="Search Wikidata item..."
+                        autocomplete="off">
+                    <button class="btn btn-outline-primary" type="button" id="resolveDepictBtn">Find</button>
+                    <div id="autocompleteList" class="autocomplete-items"></div>
+                </div>
+
+                <div id="selectedDepictBase" class="card p-2 mb-2 bg-white" style="display:none;">
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <strong id="selectedLabel"></strong> <small id="selectedId" class="text-muted"></small>
+                            <div id="selectedDesc" class="small text-muted"></div>
+                        </div>
+                        <button id="confirmAddBtn" class="btn btn-success btn-sm">Add</button>
+                    </div>
+                </div>
+
+                <div id="actionAlert" class="alert d-none" role="alert"></div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap Bundle JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Custom JS -->
+    <script src="/static/script.js"></script>
+</body>
+
+</html>
