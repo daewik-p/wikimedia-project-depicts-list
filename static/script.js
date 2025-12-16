@@ -28,22 +28,34 @@ let currentMediaId = null;
 let currentSelectedQID = null;
 
 // Search Function
-async function performSearch() {
-    const query = searchInput.value.trim();
-    if (!query) return;
+let currentPage = 1;
+let currentQuery = '';
 
-    // Reset UI
-    resultsGrid.innerHTML = '';
-    searchInfo.style.display = 'none';
+async function performSearch(isLoadMore = false) {
+    if (!isLoadMore) {
+        currentQuery = searchInput.value.trim();
+        currentPage = 1;
+        resultsGrid.innerHTML = '';
+        document.getElementById('loadMoreContainer').style.display = 'none';
+        searchInfo.style.display = 'none';
+    }
+
+    if (!currentQuery) return;
+
     loader.style.display = 'block';
 
+    if (isLoadMore) {
+        document.getElementById('loadMoreBtn').disabled = true;
+        document.getElementById('loadMoreBtn').innerText = 'Loading...';
+    }
+
     try {
-        const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+        const res = await fetch(`/api/search?q=${encodeURIComponent(currentQuery)}&page=${currentPage}`);
         const data = await res.json();
 
         loader.style.display = 'none';
 
-        if (data.found_entity) {
+        if (data.found_entity && !isLoadMore) {
             if (data.found_entity.id === data.found_entity.label) {
                 resolvedEntityName.innerText = data.found_entity.label;
             } else {
@@ -70,20 +82,38 @@ async function performSearch() {
                 `;
                 resultsGrid.appendChild(item);
             });
+
+            // Handle Load More Button
+            if (data.has_next) {
+                document.getElementById('loadMoreContainer').style.display = 'block';
+                document.getElementById('loadMoreBtn').disabled = false;
+                document.getElementById('loadMoreBtn').innerText = 'Load More';
+            } else {
+                document.getElementById('loadMoreContainer').style.display = 'none';
+            }
+
         } else {
-            resultsGrid.innerHTML = '<p class="text-center w-100">No images found depicting this entity.</p>';
+            if (!isLoadMore) {
+                resultsGrid.innerHTML = '<p class="text-center w-100">No images found depicting this entity.</p>';
+            }
+            document.getElementById('loadMoreContainer').style.display = 'none';
         }
 
     } catch (e) {
         console.error(e);
         loader.style.display = 'none';
-        resultsGrid.innerHTML = '<p class="text-danger text-center w-100">Error searching.</p>';
+        if (!isLoadMore) resultsGrid.innerHTML = '<p class="text-danger text-center w-100">Error searching.</p>';
     }
 }
 
-searchBtn.addEventListener('click', performSearch);
+searchBtn.addEventListener('click', () => performSearch(false));
 searchInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') performSearch();
+    if (e.key === 'Enter') performSearch(false);
+});
+
+document.getElementById('loadMoreBtn').addEventListener('click', () => {
+    currentPage++;
+    performSearch(true);
 });
 
 // Split View

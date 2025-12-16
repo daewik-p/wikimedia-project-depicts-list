@@ -130,10 +130,20 @@ def index():
 
 @app.route("/api/search")
 def search():
+    try:
+        return _search_impl()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+def _search_impl():
     """
     Search Commons for images in a Category (and immediate subcategories).
     """
     query = request.args.get("q")
+    page = request.args.get("page", 1, type=int)
+    
     if not query:
         return jsonify({"error": "No query provided"}), 400
 
@@ -144,14 +154,19 @@ def search():
 
     files = []
     
+    PER_PAGE = 10
+    target_count = page * PER_PAGE
+    # We fetch one extra item to check if there is a next page
+    needed_count = target_count + 1
+    
     # Helper to fetch members
-    def fetch_members(title):
+    def fetch_members(title, limit=50):
         params = {
             "action": "query",
             "generator": "categorymembers",
             "gcmtitle": title,
             "gcmtype": "file|subcat",
-            "gcmlimit": 50, # Limit per request
+            "gcmlimit": limit, # Dynamic limit
             "prop": "imageinfo",
             "iiprop": "url|extmetadata",
             "iiurlwidth": 320,
@@ -160,7 +175,13 @@ def search():
         return requests.get(COMMONS_API, params=params, headers={"User-Agent": USER_AGENT}).json()
 
     # 1. Fetch from Main Category
-    data = fetch_members(cat_title)
+    # Allow fetching slightly more than strictly needed to account for non-files and potential recursion needs (though naive)
+    # A true robust offset-based pagination would need a continuation token from MediaWiki API, but for this hybrid approach we'll fetch up to 'needed_count' + buffer
+    # Since we can't reliably jump to an offset without a token, we re-fetch from start. This is inefficient for deep pages but consistent.
+    
+    fetch_limit = min(needed_count + 50, 500) # Cap at 500
+    
+    data = fetch_members(cat_title, limit=fetch_limit)
     subcats = []
     seen_pageids = set()
 
@@ -181,31 +202,46 @@ def search():
         seen_pageids.add(page_id_str)
 
     if "query" in data and "pages" in data["query"]:
-        for page_id, page in data["query"]["pages"].items():
-            if page["ns"] == 6: # File
-                if "imageinfo" in page:
-                     add_file(page_id, page)
-            elif page["ns"] == 14: # Category
-                subcats.append(page["title"])
+        for page_id, p_data in data["query"]["pages"].items():
+            if p_data["ns"] == 6: # File
+                if "imageinfo" in p_data:
+                     add_file(page_id, p_data)
+            elif p_data["ns"] == 14: # Category
+                subcats.append(p_data["title"])
 
-    # 2. Simple Recursion (Depth 1) - Only if we don't have enough files yet
-    if len(files) < 10:
-        for subcat in subcats[:3]:
-            if len(files) >= 10:
-                break
-            sub_data = fetch_members(subcat)
-            if "query" in sub_data and "pages" in sub_data["query"]:
-                 for page_id, page in sub_data["query"]["pages"].items():
-                    if page["ns"] == 6 and "imageinfo" in page:
-                         add_file(page_id, page)
+    # 2. Simple Recursion (Depth 1) - If needed
+    # Only recurse if we haven't met the target for the CURRENT page AND future checks
     
-    # LIMIT TO 10
-    files = files[:10]
+    # Recursion Strategy: If we have enough files for this page + next indicator, stop.
+    if len(files) < needed_count:
+        for subcat in subcats[:5]: # Search first 5 subcats
+            if len(files) >= needed_count:
+                break
+            
+            # Fetch remaining needed
+            remaining = needed_count - len(files)
+            # Fetch a batch from subcat
+            sub_limit = min(remaining + 20, 500)
+            
+            sub_data = fetch_members(subcat, limit=sub_limit)
+            if "query" in sub_data and "pages" in sub_data["query"]:
+                 for page_id, p_data in sub_data["query"]["pages"].items():
+                    if p_data["ns"] == 6 and "imageinfo" in p_data:
+                         add_file(page_id, p_data)
+    
+    # Determine result slice
+    start_idx = (page - 1) * PER_PAGE
+    end_idx = start_idx + PER_PAGE
+    
+    has_next = len(files) > target_count
+    
+    # Slice the files for the response
+    current_page_files = files[start_idx:end_idx]
 
-    # 3. Batch Fetch Depicts (P180)
-    if files:
+    # 3. Batch Fetch Depicts (P180) - ONLY for the sliced files
+    if current_page_files:
         # Get M-IDs
-        mids = [f"M{f['pageid']}" for f in files]
+        mids = [f"M{f['pageid']}" for f in current_page_files]
         
         # Batch fetch SDC from Commons
         s_params = {
@@ -234,9 +270,7 @@ def search():
         # Batch fetch Labels from Wikidata
         qid_labels = {}
         if all_qids:
-            # Join all QIDs (cap is reasonable here since max 10 files * avg 3 depicts = 30 QIDs)
             q_list = list(all_qids)
-            # Chunking just in case, though 50 is fine
             for i in range(0, len(q_list), 50):
                 chunk = q_list[i:i+50]
                 wd_params = {
@@ -252,7 +286,7 @@ def search():
                         qid_labels[qid] = q_data.get("labels", {}).get("en", {}).get("value", qid)
 
         # Enrich files
-        for f in files:
+        for f in current_page_files:
             mid = f"M{f['pageid']}"
             if mid in file_to_qids:
                 f["depicts"] = [
@@ -261,7 +295,9 @@ def search():
                 ]
 
     return jsonify({
-        "results": files,
+        "results": current_page_files,
+        "has_next": has_next,
+        "page": page,
         "found_entity": {
             "id": cat_title,
             "label": cat_title,
