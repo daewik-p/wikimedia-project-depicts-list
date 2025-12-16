@@ -1,6 +1,11 @@
 import os
 import requests
-from flask import Flask, render_template, request, jsonify, session
+import io
+import uuid
+from flask import Flask, render_template, request, jsonify, session, send_from_directory
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.utils import secure_filename
+from PIL import Image
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -9,6 +14,63 @@ app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev_default")
 
 # Configuration
+BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(BASE_DIR, 'images.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'static', 'images')
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+db = SQLAlchemy(app)
+
+# --- Models ---
+class ImageModel(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    filename = db.Column(db.String(100), nullable=False) # The optimized original
+    thumbnail_filename = db.Column(db.String(100), nullable=False)
+    title = db.Column(db.String(200), nullable=True)
+    
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "title": self.title,
+            "original_url": f"/static/images/{self.filename}",
+            "thumbnail_url": f"/static/images/{self.thumbnail_filename}"
+        }
+
+# --- Helpers ---
+def process_image(file_storage):
+    """
+    Optimizes the uploaded image:
+    1. Converts to WebP (q=80)
+    2. Generates a thumbnail (max 300px, LANCZOS)
+    Returns tuple (original_filename, thumbnail_filename)
+    """
+    # Generate unique filenames
+    unique_id = uuid.uuid4().hex
+    original_filename = f"{unique_id}.webp"
+    thumbnail_filename = f"{unique_id}_thumb.webp"
+    
+    original_path = os.path.join(app.config['UPLOAD_FOLDER'], original_filename)
+    thumbnail_path = os.path.join(app.config['UPLOAD_FOLDER'], thumbnail_filename)
+
+    # Open image using Pillow
+    img = Image.open(file_storage)
+    
+    # Allow simple format conversion (RGB for WebP)
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGBA")
+    else:
+        img = img.convert("RGB")
+
+    # 1. Save Optimized Original
+    img.save(original_path, "WEBP", quality=80, optimize=True)
+
+    # 2. Generate Thumbnail
+    img.thumbnail((300, 300), Image.Resampling.LANCZOS)
+    img.save(thumbnail_path, "WEBP", quality=80, optimize=True)
+
+    return original_filename, thumbnail_filename
+
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
 BOT_USERNAME = os.getenv("BOT_USERNAME")
@@ -60,68 +122,78 @@ def index():
 @app.route("/api/search")
 def search():
     """
-    1. Search Wikidata for the QID of the query.
-    2. Search Commons for images with that QID in P180.
+    Search Commons for images in a Category (and immediate subcategories).
     """
     query = request.args.get("q")
     if not query:
         return jsonify({"error": "No query provided"}), 400
 
-    # 1. Search Wikidata for QID
-    wd_params = {
-        "action": "wbsearchentities",
-        "search": query,
-        "language": "en",
-        "format": "json",
-        "limit": 1
-    }
-    wd_resp = requests.get(WIKIDATA_API, params=wd_params, headers={"User-Agent": USER_AGENT}).json()
-    
-    if not wd_resp.get("search"):
-        return jsonify({"results": [], "found_entity": None})
-        
-    entity = wd_resp["search"][0]
-    qid = entity["id"]
-    label = entity.get("label", query)
-    description = entity.get("description", "")
+    # Ensure "Category:" prefix
+    cat_title = query.strip()
+    if not cat_title.lower().startswith("category:"):
+        cat_title = f"Category:{cat_title}"
 
-    # 2. Search Commons
-    # We use generator=search with haswbstatement
-    # Note: 'haswbstatement' search usage on Commons: "haswbstatement:P180=Q146"
-    commons_query = f"haswbstatement:P180={qid}"
-    
-    commons_params = {
-        "action": "query",
-        "generator": "search",
-        "gsrsearch": commons_query,
-        "gsrnamespace": 6, # File namespace
-        "gsrlimit": 20,
-        "prop": "imageinfo",
-        "iiprop": "url|extmetadata",
-        "format": "json"
-    }
-    
-    c_resp = requests.get(COMMONS_API, params=commons_params, headers={"User-Agent": USER_AGENT}).json()
-    
     files = []
-    if "query" in c_resp and "pages" in c_resp["query"]:
-        for page_id, page_data in c_resp["query"]["pages"].items():
-            if "imageinfo" in page_data:
-                info = page_data["imageinfo"][0]
-                files.append({
-                    "pageid": page_id,
-                    "title": page_data["title"],
-                    "url": info["url"],
-                    "thumb_url": info.get("thumburl", info["url"]), # Fallback if no thumb (should request iiurlwidth for real thumbs)
-                    "description": info["extmetadata"].get("ImageDescription", {}).get("value", "No description")
-                })
-                
+    
+    # Helper to fetch members
+    def fetch_members(title):
+        params = {
+            "action": "query",
+            "generator": "categorymembers",
+            "gcmtitle": title,
+            "gcmtype": "file|subcat",
+            "gcmlimit": 50, # Limit per request
+            "prop": "imageinfo",
+            "iiprop": "url|extmetadata",
+            "iiurlwidth": 320,
+            "format": "json"
+        }
+        return requests.get(COMMONS_API, params=params, headers={"User-Agent": USER_AGENT}).json()
+
+    # 1. Fetch from Main Category
+    data = fetch_members(cat_title)
+    subcats = []
+    
+    if "query" in data and "pages" in data["query"]:
+        for page_id, page in data["query"]["pages"].items():
+            if page["ns"] == 6: # File
+                if "imageinfo" in page:
+                     info = page["imageinfo"][0]
+                     files.append({
+                        "pageid": page_id,
+                        "title": page["title"],
+                        "url": info["url"],
+                        "thumb_url": info.get("thumburl", info["url"]),
+                        "description": info["extmetadata"].get("ImageDescription", {}).get("value", "No description")
+                     })
+            elif page["ns"] == 14: # Category
+                subcats.append(page["title"])
+
+    # 2. Simple Recursion (Depth 1) - Optional but requested
+    # Fetch from first 3 subcats to avoid timeout/spamming
+    for subcat in subcats[:3]:
+        sub_data = fetch_members(subcat)
+        if "query" in sub_data and "pages" in sub_data["query"]:
+             for page_id, page in sub_data["query"]["pages"].items():
+                if page["ns"] == 6 and "imageinfo" in page:
+                     info = page["imageinfo"][0]
+                     # Avoid duplicates if file is in both
+                     if not any(f["pageid"] == page_id for f in files):
+                         files.append({
+                            "pageid": page_id,
+                            "title": page["title"],
+                            "url": info["url"],
+                            "thumb_url": info.get("thumburl", info["url"]),
+                            "description": info["extmetadata"].get("ImageDescription", {}).get("value", "No description")
+                         })
+    
+    # We don't have a "Found Entity" from Wikidata anymore, so we mock it for the UI
     return jsonify({
         "results": files,
         "found_entity": {
-            "id": qid,
-            "label": label,
-            "description": description
+            "id": cat_title,
+            "label": cat_title,
+            "description": "Wikimedia Commons Category"
         }
     })
 
@@ -284,5 +356,59 @@ def add_claim():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# --- Local Gallery Routes ---
+
+@app.route("/api/upload", methods=["POST"])
+def upload_image():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+    
+    if file:
+        try:
+            original_fn, thumb_fn = process_image(file)
+            
+            new_image = ImageModel(
+                filename=original_fn,
+                thumbnail_filename=thumb_fn,
+                title=request.form.get("title", file.filename)
+            )
+            db.session.add(new_image)
+            db.session.commit()
+            
+            return jsonify({"success": True, "image": new_image.to_dict()}), 201
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    
+    return jsonify({"error": "Upload failed"}), 400
+
+@app.route("/api/images", methods=["GET"])
+def get_images():
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 20, type=int)
+    
+    pagination = db.paginate(db.select(ImageModel), page=page, per_page=per_page)
+    
+    return jsonify({
+        "images": [img.to_dict() for img in pagination.items],
+        "meta": {
+            "total_pages": pagination.pages,
+            "current_page": page,
+            "has_next": pagination.has_next,
+            "total_items": pagination.total
+        }
+    })
+
+@app.route('/static/images/<path:filename>')
+def serve_static_image(filename):
+    response = send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    # Cache for 1 year
+    response.headers['Cache-Control'] = 'public, max-age=31536000'
+    return response
+
 if __name__ == "__main__":
+    with app.app_context():
+        db.create_all()
     app.run(debug=True, port=5000)

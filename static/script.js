@@ -44,7 +44,11 @@ async function performSearch() {
         loader.style.display = 'none';
 
         if (data.found_entity) {
-            resolvedEntityName.innerText = `${data.found_entity.label} (${data.found_entity.id})`;
+            if (data.found_entity.id === data.found_entity.label) {
+                resolvedEntityName.innerText = data.found_entity.label;
+            } else {
+                resolvedEntityName.innerText = `${data.found_entity.label} (${data.found_entity.id})`;
+            }
             resolvedEntityDesc.innerText = data.found_entity.description;
             searchInfo.style.display = 'block';
         }
@@ -84,8 +88,8 @@ async function openSplitView(file) {
     splitView.style.display = 'flex';
     detailImage.src = file.url; // Use full size or large thumb
     detailTitle.innerText = file.title.replace("File:", "");
-    detailDesc.innerText = file.description;
-    detailLink.href = file.url; // Actually this is the image url, we should link to description page: "https://commons.wikimedia.org/wiki/" + file.title
+    detailDesc.innerHTML = file.description;
+    detailLink.href = "https://commons.wikimedia.org/wiki/" + encodeURIComponent(file.title); // Actually this is the image url, we should link to description page: "https://commons.wikimedia.org/wiki/" + file.title
     detailLink.href = "https://commons.wikimedia.org/wiki/" + encodeURIComponent(file.title);
 
     // Reset Right Panel
