@@ -63,6 +63,9 @@ async function performSearch() {
                     <img src="${file.thumb_url}" alt="${file.title}" loading="lazy">
                     <div class="grid-item-info">
                         <div class="grid-item-title" title="${file.title}">${file.title.replace("File:", "")}</div>
+                        <div class="mt-2 d-flex flex-wrap gap-1">
+                            ${file.depicts ? file.depicts.map(d => `<span class="badge bg-secondary" style="font-size: 0.7em;">${d.label}</span>`).join('') : ''}
+                        </div>
                     </div>
                 `;
                 resultsGrid.appendChild(item);

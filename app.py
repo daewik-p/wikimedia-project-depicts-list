@@ -5,8 +5,14 @@ import uuid
 from flask import Flask, render_template, request, jsonify, session, send_from_directory
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.utils import secure_filename
-from PIL import Image
 from dotenv import load_dotenv
+
+try:
+    from PIL import Image
+    PILLOW_AVAILABLE = True
+except ImportError:
+    PILLOW_AVAILABLE = False
+    print("Warning: Pillow not installed. Image uploads will be disabled.")
 
 load_dotenv()
 
@@ -45,6 +51,9 @@ def process_image(file_storage):
     2. Generates a thumbnail (max 300px, LANCZOS)
     Returns tuple (original_filename, thumbnail_filename)
     """
+    if not PILLOW_AVAILABLE:
+        raise ImportError("Pillow library is not available. Image processing is disabled.")
+
     # Generate unique filenames
     unique_id = uuid.uuid4().hex
     original_filename = f"{unique_id}.webp"
@@ -153,41 +162,104 @@ def search():
     # 1. Fetch from Main Category
     data = fetch_members(cat_title)
     subcats = []
-    
+    seen_pageids = set()
+
+    def add_file(page_id, page_data):
+        page_id_str = str(page_id)
+        if page_id_str in seen_pageids:
+            return
+        
+        info = page_data.get("imageinfo", [{}])[0]
+        files.append({
+            "pageid": page_id_str,
+            "title": page_data["title"],
+            "url": info.get("url"),
+            "thumb_url": info.get("thumburl", info.get("url")),
+            "description": info.get("extmetadata", {}).get("ImageDescription", {}).get("value", "No description"),
+            "depicts": [] # Initialize
+        })
+        seen_pageids.add(page_id_str)
+
     if "query" in data and "pages" in data["query"]:
         for page_id, page in data["query"]["pages"].items():
             if page["ns"] == 6: # File
                 if "imageinfo" in page:
-                     info = page["imageinfo"][0]
-                     files.append({
-                        "pageid": page_id,
-                        "title": page["title"],
-                        "url": info["url"],
-                        "thumb_url": info.get("thumburl", info["url"]),
-                        "description": info["extmetadata"].get("ImageDescription", {}).get("value", "No description")
-                     })
+                     add_file(page_id, page)
             elif page["ns"] == 14: # Category
                 subcats.append(page["title"])
 
-    # 2. Simple Recursion (Depth 1) - Optional but requested
-    # Fetch from first 3 subcats to avoid timeout/spamming
-    for subcat in subcats[:3]:
-        sub_data = fetch_members(subcat)
-        if "query" in sub_data and "pages" in sub_data["query"]:
-             for page_id, page in sub_data["query"]["pages"].items():
-                if page["ns"] == 6 and "imageinfo" in page:
-                     info = page["imageinfo"][0]
-                     # Avoid duplicates if file is in both
-                     if not any(f["pageid"] == page_id for f in files):
-                         files.append({
-                            "pageid": page_id,
-                            "title": page["title"],
-                            "url": info["url"],
-                            "thumb_url": info.get("thumburl", info["url"]),
-                            "description": info["extmetadata"].get("ImageDescription", {}).get("value", "No description")
-                         })
+    # 2. Simple Recursion (Depth 1) - Only if we don't have enough files yet
+    if len(files) < 10:
+        for subcat in subcats[:3]:
+            if len(files) >= 10:
+                break
+            sub_data = fetch_members(subcat)
+            if "query" in sub_data and "pages" in sub_data["query"]:
+                 for page_id, page in sub_data["query"]["pages"].items():
+                    if page["ns"] == 6 and "imageinfo" in page:
+                         add_file(page_id, page)
     
-    # We don't have a "Found Entity" from Wikidata anymore, so we mock it for the UI
+    # LIMIT TO 10
+    files = files[:10]
+
+    # 3. Batch Fetch Depicts (P180)
+    if files:
+        # Get M-IDs
+        mids = [f"M{f['pageid']}" for f in files]
+        
+        # Batch fetch SDC from Commons
+        s_params = {
+            "action": "wbgetentities",
+            "ids": "|".join(mids),
+            "format": "json"
+        }
+        s_resp = requests.get(COMMONS_API, params=s_params, headers={"User-Agent": USER_AGENT}).json()
+        
+        all_qids = set()
+        file_to_qids = {} # mid -> [qid, ...]
+
+        if "entities" in s_resp:
+            for mid, entity in s_resp["entities"].items():
+                p180 = []
+                claims = entity.get("statements", {}).get("P180", [])
+                for claim in claims:
+                    if claim.get("mainsnak", {}).get("snaktype") == "value":
+                        val = claim["mainsnak"]["datavalue"]["value"]
+                        if val.get("entity-type") == "item": # Should be item
+                             qid = val["id"]
+                             p180.append(qid)
+                             all_qids.add(qid)
+                file_to_qids[mid] = p180
+        
+        # Batch fetch Labels from Wikidata
+        qid_labels = {}
+        if all_qids:
+            # Join all QIDs (cap is reasonable here since max 10 files * avg 3 depicts = 30 QIDs)
+            q_list = list(all_qids)
+            # Chunking just in case, though 50 is fine
+            for i in range(0, len(q_list), 50):
+                chunk = q_list[i:i+50]
+                wd_params = {
+                    "action": "wbgetentities",
+                    "ids": "|".join(chunk),
+                    "props": "labels",
+                    "languages": "en",
+                    "format": "json"
+                }
+                wd_resp = requests.get(WIKIDATA_API, params=wd_params, headers={"User-Agent": USER_AGENT}).json()
+                if "entities" in wd_resp:
+                    for qid, q_data in wd_resp["entities"].items():
+                        qid_labels[qid] = q_data.get("labels", {}).get("en", {}).get("value", qid)
+
+        # Enrich files
+        for f in files:
+            mid = f"M{f['pageid']}"
+            if mid in file_to_qids:
+                f["depicts"] = [
+                    {"id": q, "label": qid_labels.get(q, q)}
+                    for q in file_to_qids[mid]
+                ]
+
     return jsonify({
         "results": files,
         "found_entity": {
